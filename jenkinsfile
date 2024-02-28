@@ -1,0 +1,74 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+         KUBECTL_VSPHERE_PASSWORD = credentials('vsphere')
+    }
+
+    stages {
+        stage('GIT') {
+            steps {
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], extensions: [], userRemoteConfigs: [[credentialsId: 'creds', url: 'https://github.com/Shanthaveer/Hello1.git']]])
+            }
+        }
+	
+        
+        stage('COMPILE') {
+            steps {
+                sh "mvn clean compile -DskipTests=true"
+            }
+        }
+        
+        stage('Sonarqube') {
+            steps {
+                sh 'mvn clean install -DskipTests=true'
+                withSonarQubeEnv('sq1') {
+                    sh "$SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=springboot1-project -Dsonar.java.binaries=. -Dsonar.projectKey=springboot-project"
+                }
+            }
+        }
+        
+        stage("Podman build") {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'artifactory_pass', variable: 'docker_password')]) {
+                        sh '''
+                            podman build -t 192.168.31.86:443/test-app/app:v2 .
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage("Pushing Image to Jfrog") {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'artifactory_pass', variable: 'docker_password')]) {
+                        sh '''
+                            podman login -u rahul -p $docker_password 192.168.31.86:443
+                            podman push 192.168.31.86:443/test-app/app:v2
+                        '''
+                    }
+                }
+            }
+        }
+    
+        stage("Deployment to Tanzu cluster") {
+            steps {
+                    sh 'kubectl vsphere login --server=192.168.51.21 --vsphere-username administrator@prodevans.india --insecure-skip-tls-verify --tanzu-kubernetes-cluster-name supervisor-test --tanzu-kubernetes-cluster-namespace namespace-test'
+                    sh 'echo $KUBECTL_VSPHERE_PASSWORD'
+                    sh "kubectl get nodes"
+                    sh "kubectl create -f /tmp/springboot.yaml"
+                    sh "kubectl create -f /tmp/services.yaml"
+                    sh "kubectl get svc -n spring-app"
+                }
+            }
+        }
+    }
+
